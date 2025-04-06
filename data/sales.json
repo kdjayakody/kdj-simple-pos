@@ -1,0 +1,17 @@
+[
+    {
+        "sale_id": "20250407-001",
+        "timestamp": "2025-04-07T02:51:53+05:30",
+        "items": [
+            {
+                "product_id": "123",
+                "quantity": 1,
+                "price_at_sale": 1500
+            }
+        ],
+        "total_amount": 1500,
+        "amount_received": 2000,
+        "change_given": 500,
+        "payment_type": "Cash"
+    }
+]
