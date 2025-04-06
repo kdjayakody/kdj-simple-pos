@@ -1,0 +1,98 @@
+name: Deploy Simple POS to aaPanel (Simplified Permissions)
+
+# Trigger the workflow on push events to the 'main' branch
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy Application to Server
+    runs-on: ubuntu-latest # Use a standard Linux runner
+
+    steps:
+      # 1. Checkout Repository Code
+      - name: Checkout code
+        uses: actions/checkout@v4 # Fetches your repository code onto the runner
+
+      # 2. Setup SSH Agent
+      # Configures SSH access using the private key stored in secrets
+      - name: Set up SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # 3. Add Server Host Key using ssh-keyscan
+      # Trusts the server host key on first connection during the workflow run.
+      - name: Add SSH host key to known_hosts (using keyscan)
+        run: |
+          mkdir -p ~/.ssh/
+          chmod 700 ~/.ssh
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+        # Note: Using ssh-keyscan blindly trusts the host key presented by the server during the workflow run.
+
+      # 4. Deploy Files using Rsync over SSH
+      # Copies files to the server, deleting files on the server that are not in the repository.
+      - name: Deploy files via Rsync
+        run: |
+          echo "Starting deployment to ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:${{ secrets.DEPLOY_PATH }}"
+          rsync -avz --delete \
+            --exclude='.git*' \
+            --exclude='.github' \
+            --exclude='README.md' \
+            --exclude='.DS_Store' \
+            --exclude='*.bat' \
+            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:${{ secrets.DEPLOY_PATH }}
+          echo "Deployment completed."
+
+      # 5. Set Basic Permissions on Server (Ownership requires manual check!)
+      # WARNING: This step only sets basic permissions. Ownership (chown) is SKIPPED.
+      # You MUST verify/set ownership and permissions manually, especially for the 'data' directory.
+      - name: Set basic permissions (Manual ownership check required!)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "Setting basic permissions in target directory: ${{ secrets.DEPLOY_PATH }}"
+            cd ${{ secrets.DEPLOY_PATH }} || exit 1 # Exit if changing directory fails
+
+            # Set standard directory permissions (rwx for owner, rx for group/others)
+            # Using sudo assumes the deploy user has passwordless sudo for chmod. Remove 'sudo' if not needed/available.
+            find . -type d -exec sudo chmod 755 {} \;
+            echo "Standard directory permissions attempted (755)."
+
+            # Set standard file permissions (rw for owner, r for group/others)
+            find . -type f -exec sudo chmod 644 {} \;
+            echo "Standard file permissions attempted (644)."
+
+            # WARNING: Attempting to make 'data' directory world-writable (777) as a fallback.
+            # This is INSECURE but necessary for PHP to write JSON files without knowing the correct web server user/group.
+            # Manually fix ownership (e.g., `sudo chown -R www:www data`) and permissions (e.g., 775/664) after deployment!
+            if [ -d "data" ]; then
+              sudo chmod -R 777 data
+              echo "WARNING: Permissions for 'data' directory set to 777 (world-writable) as a fallback. Please set correct ownership and permissions manually for security!"
+            else
+              echo "WARNING: 'data' directory not found in ${{ secrets.DEPLOY_PATH }}. Cannot set specific permissions."
+            fi
+            echo "Basic permissions adjustment completed. VERIFY MANUALLY!"
+
+      # 6. Optional: Restart PHP-FPM (Still requires sudo and correct service name)
+      # Uncomment and configure if necessary for cache clearing.
+      # - name: Restart PHP-FPM service
+      #   uses: appleboy/ssh-action@v1.0.3
+      #   with:
+      #     host: ${{ secrets.SERVER_IP }}
+      #     username: ${{ secrets.SERVER_USER }}
+      #     key: ${{ secrets.SSH_PRIVATE_KEY }}
+      #     script: |
+      #       echo "Attempting to restart PHP-FPM..."
+      #       # === IMPORTANT: Replace php-fpm-VERSION.service below! ===
+      #       # Find your version via `systemctl list-units | grep php` or aaPanel interface.
+      #       # Common examples: php-fpm-74.service, php8.1-fpm.service, etc.
+      #       sudo systemctl restart php-fpm-VERSION.service
+      #       echo "PHP-FPM restart command executed."
+
