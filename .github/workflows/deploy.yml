@@ -16,26 +16,51 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Install SSH key directly rather than using the action
-      - name: Install SSH key
+      # 2. Debug and install SSH key with more robust approach
+      - name: Debug and install SSH key
         run: |
+          # Create SSH directory with proper permissions
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/id_rsa
+          chmod 700 ~/.ssh
+          
+          # Show some debug info
+          echo "Using SSH key for authentication"
+          echo "Server IP: ${{ secrets.SERVER_IP }}"
+          echo "Server User: ${{ secrets.SERVER_USER }}"
+          
+          # Process the key - ensuring no carriage returns and proper format
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          
+          # Print the fingerprint (redacted) for debugging
+          ssh-keygen -l -f ~/.ssh/id_rsa | sed 's/\(.\{10\}\).*\(.\{10\}\)/\1...\2/'
+          
+          # Start SSH agent and add key
           eval "$(ssh-agent -s)"
-          ssh-add ~/.ssh/id_rsa
+          ssh-add -v ~/.ssh/id_rsa
+          
+          # Add server to known hosts
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
-
-      # 3. Test SSH connection before deploying
+          
+          # Verify known_hosts
+          echo "Server added to known_hosts:"
+          cat ~/.ssh/known_hosts | grep ${{ secrets.SERVER_IP }}
+      
+      # 3. Test SSH connection with verbose output
       - name: Test SSH connection
-        run: ssh -o StrictHostKeyChecking=accept-new ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} echo "Connection successful"
+        run: |
+          # Test with verbose output for debugging
+          ssh -v -o StrictHostKeyChecking=accept-new ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} "echo Connection successful; whoami; pwd"
 
-      # 4. Deploy Files using Rsync over SSH
+      # 4. Deploy Files using Rsync over SSH with fallback options
       - name: Deploy files via Rsync
+        if: success()
         run: |
           echo "Starting deployment to ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:${{ secrets.DEPLOY_PATH }}"
+          # Try with additional SSH options for troubleshooting
           rsync -avz --delete \
+            -e "ssh -v -o StrictHostKeyChecking=accept-new" \
             --exclude='.git*' \
             --exclude='.github' \
             --exclude='README.md' \
