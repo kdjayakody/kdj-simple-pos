@@ -29,7 +29,7 @@ define('SALES_FILE', DATA_PATH . 'sales.json');
 
 // --- Basic Store Settings ---
 // Define the name of the store, potentially used in headers or receipts.
-define('STORE_NAME', 'My Simple Grocery');
+define('STORE_NAME', 'KDJ Grocery Store');
 
 // Ensure the data directory exists, try to create if not (basic check)
 if (!is_dir(DATA_PATH)) {
