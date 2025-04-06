@@ -1,6 +1,5 @@
-name: Deploy Simple POS to AWS Lightsail (aaPanel)
+name: Deploy to aaPanel
 
-# Trigger the workflow on push events to the 'main' branch
 on:
   push:
     branches:
@@ -8,126 +7,48 @@ on:
 
 jobs:
   deploy:
-    name: Deploy Application to Lightsail Server
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout Repository Code
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      # 2. Debug and install SSH key with more robust approach
-      - name: Debug and install SSH key
-        run: |
-          # Create SSH directory with proper permissions
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          
-          # Show some debug info
-          echo "Using SSH key for authentication"
-          echo "Server IP: ${{ secrets.SERVER_IP }}"
-          echo "Server User: ${{ secrets.SERVER_USER }}"
-          
-          # Process the key - ensuring no carriage returns and proper format
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          
-          # Print the fingerprint (redacted) for debugging
-          ssh-keygen -l -f ~/.ssh/id_rsa | sed 's/\(.\{10\}\).*\(.\{10\}\)/\1...\2/'
-          
-          # Start SSH agent and add key
-          eval "$(ssh-agent -s)"
-          ssh-add -v ~/.ssh/id_rsa
-          
-          # Add server to known hosts
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
-          
-          # Verify known_hosts
-          echo "Server added to known_hosts:"
-          cat ~/.ssh/known_hosts | grep ${{ secrets.SERVER_IP }}
-      
-      # 3. Test SSH connection with verbose output
-      - name: Test SSH connection
-        run: |
-          # Test with verbose output for debugging
-          ssh -v -o StrictHostKeyChecking=accept-new ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} "echo Connection successful; whoami; pwd"
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.7.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      # 4. Deploy Files using Rsync over SSH with fallback options
-      - name: Deploy files via Rsync
-        if: success()
-        run: |
-          echo "Starting deployment to ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:${{ secrets.DEPLOY_PATH }}"
-          # Try with additional SSH options for troubleshooting
-          rsync -avz --delete \
-            -e "ssh -v -o StrictHostKeyChecking=accept-new" \
-            --exclude='.git*' \
-            --exclude='.github' \
-            --exclude='README.md' \
-            --exclude='.DS_Store' \
-            --exclude='*.bat' \
-            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:${{ secrets.DEPLOY_PATH }}
-          echo "Deployment completed."
+    - name: Configure SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo -e "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
 
-      # 5. Set Permissions on Server
-      - name: Set permissions
-        run: |
-          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} "
-            cd ${{ secrets.DEPLOY_PATH }} || exit 1
-            
-            # Set standard directory permissions (755)
-            sudo find . -type d -exec chmod 755 {} \;
-            echo 'Set directory permissions to 755'
-            
-            # Set standard file permissions (644)
-            sudo find . -type f -exec chmod 644 {} \;
-            echo 'Set file permissions to 644'
-            
-            # Handle data directory
-            if [ -d \"data\" ]; then
-              sudo chmod -R 775 data
-              echo 'Set data directory permissions to 775'
-            else
-              sudo mkdir -p data
-              sudo chmod -R 775 data
-              echo 'Created data directory with permissions 775'
-            fi
-            
-            # Detect and set appropriate web server user
-            WEB_USER='www'
-            if id www-data &>/dev/null; then
-              WEB_USER='www-data'
-            elif id apache &>/dev/null; then
-              WEB_USER='apache'
-            fi
-            
-            echo \"Detected web user: \$WEB_USER\"
-            sudo chown -R \$WEB_USER:\$WEB_USER data
-            echo 'Set data directory ownership to web user'
-            
-            echo 'Permission setting completed'
-          "
+    - name: Prepare for deployment
+      run: |
+        # Create a list of files to deploy, excluding secrets and .htaccess
+        find . -type f -not -path "./data/*" -not -path "./.git/*" -not -name ".htaccess" > files_to_deploy.txt
+        mkdir -p to_deploy
+        while IFS= read -r file; do
+          mkdir -p "to_deploy/$(dirname "$file")"
+          cp "$file" "to_deploy/$file"
+        done < files_to_deploy.txt
 
-      # 6. Optional: Restart PHP service if needed
-      - name: Check and restart PHP service if needed
-        run: |
-          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} "
-            if command -v php-fpm &>/dev/null; then
-              # Try to find the PHP-FPM service by checking common names
-              for VERSION in 8.2 8.1 8.0 7.4 7.3 7.2; do
-                if systemctl is-active --quiet php\$VERSION-fpm 2>/dev/null; then
-                  sudo systemctl restart php\$VERSION-fpm
-                  echo \"Restarted php\$VERSION-fpm service\"
-                  break
-                fi
-              done
-              
-              # If no versioned service found, try generic php-fpm
-              if systemctl is-active --quiet php-fpm 2>/dev/null; then
-                sudo systemctl restart php-fpm
-                echo 'Restarted php-fpm service'
-              fi
-            else
-              echo 'No PHP-FPM service found to restart'
-            fi
-          "
+    - name: Deploy to server
+      env:
+        SERVER_USER: ${{ secrets.SERVER_USER }}
+        SERVER_IP: ${{ secrets.SERVER_IP }}
+        SERVER_PATH: ${{ secrets.DEPLOY_PATH }}
+      run: |
+        echo "Deploying to server..."
+        # Use scp with recursive option to copy the directory structure
+        scp -r to_deploy/* $SERVER_USER@$SERVER_IP:$SERVER_PATH/
+        
+        # Execute commands on the server
+        ssh $SERVER_USER@$SERVER_IP << EOF
+        cd $SERVER_PATH
+        sudo chown -R www:www .
+        sudo chmod -R 755 .
+        sudo service nginx restart
+        sudo service php-fpm restart
+        echo "Deployment successful!"
+        EOF
