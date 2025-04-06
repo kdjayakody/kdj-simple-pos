@@ -95,4 +95,3 @@ jobs:
       #       sudo systemctl restart php-fpm-VERSION.service
       #       echo "PHP-FPM restart command executed."
 
-Then thin water maker. 
