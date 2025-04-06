@@ -9,33 +9,29 @@ on:
 jobs:
   deploy:
     name: Deploy Application to Lightsail Server
-    runs-on: ubuntu-latest # Use a standard Linux runner
+    runs-on: ubuntu-latest
 
     steps:
       # 1. Checkout Repository Code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Setup SSH Agent
-      # Uses the private key from your GitHub secret for authentication.
-      # Ensure secrets.SSH_PRIVATE_KEY contains the correct private key.
-      - name: Set up SSH key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      # 3. Add Server Host Key using ssh-keyscan
-      # Connects to your server to get its host key and adds it to known_hosts.
-      - name: Add SSH host key to known_hosts (using keyscan)
+      # 2. Install SSH key directly rather than using the action
+      - name: Install SSH key
         run: |
-          mkdir -p ~/.ssh/
-          chmod 700 ~/.ssh
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          eval "$(ssh-agent -s)"
+          ssh-add ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
-        # Note: This trusts the host key presented by the server during the workflow run.
+
+      # 3. Test SSH connection before deploying
+      - name: Test SSH connection
+        run: ssh -o StrictHostKeyChecking=accept-new ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} echo "Connection successful"
 
       # 4. Deploy Files using Rsync over SSH
-      # Ensure secrets.SERVER_USER is set to 'ubuntu' for AWS Lightsail Ubuntu instances.
       - name: Deploy files via Rsync
         run: |
           echo "Starting deployment to ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:${{ secrets.DEPLOY_PATH }}"
@@ -48,50 +44,65 @@ jobs:
             ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:${{ secrets.DEPLOY_PATH }}
           echo "Deployment completed."
 
-      # 5. Set Basic Permissions on Server (Manual Ownership/Permission Fix Required Post-Deploy!)
-      # WARNING: This step cannot set correct ownership without WEB_USER/WEB_GROUP secrets.
-      # It uses 'sudo' assuming the 'ubuntu' user might need it for chmod in the web root.
-      # The 'ubuntu' user might need passwordless sudo configured for 'chmod' on the server.
-      - name: Set basic permissions (Manual Fix Required!)
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          username: ${{ secrets.SERVER_USER }} # Should be 'ubuntu' for Lightsail
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            echo "Setting basic permissions in target directory: ${{ secrets.DEPLOY_PATH }}"
-            cd ${{ secrets.DEPLOY_PATH }} || exit 1 # Exit if changing directory fails
-
+      # 5. Set Permissions on Server
+      - name: Set permissions
+        run: |
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} "
+            cd ${{ secrets.DEPLOY_PATH }} || exit 1
+            
             # Set standard directory permissions (755)
-            find . -type d -exec sudo chmod 755 {} \;
-            echo "Standard directory permissions attempted (755)."
-
+            sudo find . -type d -exec chmod 755 {} \;
+            echo 'Set directory permissions to 755'
+            
             # Set standard file permissions (644)
-            find . -type f -exec sudo chmod 644 {} \;
-            echo "Standard file permissions attempted (644)."
-
-            # WARNING: Insecure Fallback! Making 'data' directory world-writable (777).
-            # You MUST manually fix ownership (e.g., sudo chown -R www-data:www-data data)
-            # and permissions (e.g., sudo chmod -R 775 data) after deployment!
-            # (Replace www-data:www-data with the actual user/group PHP runs as on your server)
-            if [ -d "data" ]; then
-              sudo chmod -R 777 data
-              echo "WARNING: Permissions for 'data' directory set to 777 (world-writable). Fix ownership/permissions manually!"
+            sudo find . -type f -exec chmod 644 {} \;
+            echo 'Set file permissions to 644'
+            
+            # Handle data directory
+            if [ -d \"data\" ]; then
+              sudo chmod -R 775 data
+              echo 'Set data directory permissions to 775'
             else
-              echo "WARNING: 'data' directory not found in ${{ secrets.DEPLOY_PATH }}. Cannot set specific permissions."
+              sudo mkdir -p data
+              sudo chmod -R 775 data
+              echo 'Created data directory with permissions 775'
             fi
-            echo "Basic permissions adjustment completed. VERIFY MANUALLY!"
+            
+            # Detect and set appropriate web server user
+            WEB_USER='www'
+            if id www-data &>/dev/null; then
+              WEB_USER='www-data'
+            elif id apache &>/dev/null; then
+              WEB_USER='apache'
+            fi
+            
+            echo \"Detected web user: \$WEB_USER\"
+            sudo chown -R \$WEB_USER:\$WEB_USER data
+            echo 'Set data directory ownership to web user'
+            
+            echo 'Permission setting completed'
+          "
 
-      # Optional: Restart PHP-FPM (Requires sudo and correct service name)
-      # - name: Restart PHP-FPM service
-      #   uses: appleboy/ssh-action@v1.0.3
-      #   with:
-      #     host: ${{ secrets.SERVER_IP }}
-      #     username: ${{ secrets.SERVER_USER }} # Should be 'ubuntu'
-      #     key: ${{ secrets.SSH_PRIVATE_KEY }}
-      #     script: |
-      #       echo "Attempting to restart PHP-FPM..."
-      #       # === IMPORTANT: Replace php-fpm-VERSION.service below! Find yours on the server ===
-      #       sudo systemctl restart php-fpm-VERSION.service
-      #       echo "PHP-FPM restart command executed."
-
+      # 6. Optional: Restart PHP service if needed
+      - name: Check and restart PHP service if needed
+        run: |
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} "
+            if command -v php-fpm &>/dev/null; then
+              # Try to find the PHP-FPM service by checking common names
+              for VERSION in 8.2 8.1 8.0 7.4 7.3 7.2; do
+                if systemctl is-active --quiet php\$VERSION-fpm 2>/dev/null; then
+                  sudo systemctl restart php\$VERSION-fpm
+                  echo \"Restarted php\$VERSION-fpm service\"
+                  break
+                fi
+              done
+              
+              # If no versioned service found, try generic php-fpm
+              if systemctl is-active --quiet php-fpm 2>/dev/null; then
+                sudo systemctl restart php-fpm
+                echo 'Restarted php-fpm service'
+              fi
+            else
+              echo 'No PHP-FPM service found to restart'
+            fi
+          "
